@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3D Track Racer</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+      background-color: #000;
+    }
+    #canvas-container {
+      width: 100vw;
+      height: 100vh;
+    }
+    #hud {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      color: #fff;
+      font-size: 20px;
+      font-weight: bold;
+      text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+      pointer-events: none;
+    }
+    #controls-hint {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      color: #fff;
+      font-size: 14px;
+      background: rgba(0, 0, 0, 0.5);
+      padding: 10px 15px;
+      border-radius: 8px;
+      pointer-events: none;
+    }
+  </style>
+
+  <!-- Import Three.js for 3D graphics and Cannon.js for 3D physics -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
+</head>
+<body>
+
+  <div id="hud">Speed: <span id="speed">0</span> km/h</div>
+  <div id="controls-hint">
+    <strong>Controls:</strong><br>
+    W / Up Arrow : Accelerate<br>
+    S / Down Arrow : Reverse / Brake<br>
+    A / Left Arrow : Steer Left<br>
+    D / Right Arrow : Steer Right<br>
+    R : Reset Car
+  </div>
+  <div id="canvas-container"></div>
+
+  <script>
+    // --- SETUP WORLD & PHYSICS ---
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xbfd1e5);
+    scene.fog = new THREE.FogExp2(0xbfd1e5, 0.005);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+    const world = new CANNON.World();
+    world.gravity.set(0, -9.82, 0);
+    world.broadphase = new CANNON.NaiveBroadphase();
+    world.defaultContactMaterial.friction = 0.1;
+
+    // --- LIGHTING ---
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    dirLight.position.set(100, 150, 50);
+    dirLight.castShadow = true;
+    dirLight.shadow.mapSize.width = 2048;
+    dirLight.shadow.mapSize.height = 2048;
+    dirLight.shadow.camera.near = 10;
+    dirLight.shadow.camera.far = 400;
+    const d = 150;
+    dirLight.shadow.camera.left = -d;
+    dirLight.shadow.camera.right = d;
+    dirLight.shadow.camera.top = d;
+    dirLight.shadow.camera.bottom = -d;
+    scene.add(dirLight);
+
+    // --- ENVIRONMENT & TRACK ---
+    // Ground
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0x33aa33 });
+    const groundGeo = new THREE.PlaneGeometry(1000, 1000);
+    const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+    groundMesh.rotation.x = -Math.PI / 2;
+    groundMesh.receiveShadow = true;
+    scene.add(groundMesh);
+
+    const groundBody = new CANNON.Body({
+      mass: 0,
+      shape: new CANNON.Plane(),
+      material: new CANNON.Material({ friction: 0.5 })
+    });
+    groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
+    world.addBody(groundBody);
+
+    // Track Creation
+    const trackMaterial = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.8 });
+    const wallMaterial = new THREE.MeshStandardMaterial({ color: 0xcc3333 });
+
+    function createTrackSegment(x, z, width, depth, rotation = 0) {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, 0.2, depth), trackMaterial);
+      mesh.position.set(x, 0.1, z);
+      mesh.rotation.y = rotation;
+      mesh.receiveShadow = true;
+      scene.add(mesh);
+
+      const shape = new CANNON.Box(new CANNON.Vec3(width / 2, 0.1, depth / 2));
+      const body = new CANNON.Body({ mass: 0, shape: shape });
+      body.position.set(x, 0.1, z);
+      body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), rotation);
+      world.addBody(body);
+    }
+
+    // Oval Track Segments
+    createTrackSegment(0, -100, 40, 200);      // Straight A
+    createTrackSegment(200, -100, 40, 200);    // Straight B
+    createTrackSegment(100, -200, 240, 40);    // Top Curve / Straight
+    createTrackSegment(100, 0, 240, 40);       // Bottom Curve / Start Line
+
+    // --- CAR CREATION ---
+    const carBodyGroup = new THREE.Group();
+
+    // Main Chassis
+    const chassisGeo = new THREE.BoxGeometry(2, 0.8, 4);
+    const chassisMat = new THREE.MeshStandardMaterial({ color: 0x2266ff, metalness: 0.3, roughness: 0.2 });
+    const chassisMesh = new THREE.Mesh(chassisGeo, chassisMat);
+    chassisMesh.castShadow = true;
+    chassisMesh.position.y = 0.6;
+    carBodyGroup.add(chassisMesh);
+
+    // Cabin
+    const cabinGeo = new THREE.BoxGeometry(1.6, 0.6, 2);
+    const cabinMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+    const cabinMesh = new THREE.Mesh(cabinGeo, cabinMat);
+    cabinMesh.castShadow = true;
+    cabinMesh.position.set(0, 1.2, -0.3);
+    carBodyGroup.add(cabinMesh);
+
+    scene.add(carBodyGroup);
+
+    // Car Physics Body
+    const chassisShape = new CANNON.Box(new CANNON.Vec3(1, 0.4, 2));
+    const carPhysicsBody = new CANNON.Body({ mass: 1500 });
+    carPhysicsBody.addShape(chassisShape, new CANNON.Vec3(0, 0.6, 0));
+    carPhysicsBody.position.set(0, 2, 0);
+    world.addBody(carPhysicsBody);
+
+    // Raycast Vehicle Controller
+    const vehicle = new CANNON.RaycastVehicle({
+      chassisBody: carPhysicsBody,
+      indexRightAxis: 0,
+      indexUpAxis: 1,
+      indexForwardAxis: 2
+    });
+
+    // Wheel Options
+    const options = {
+      radius: 0.4,
+      directionLocal: new CANNON.Vec3(0, -1, 0),
+      suspensionStiffness: 30,
+      suspensionRestLength: 0.3,
+      frictionSlip: 2.5,
+      dampingRelaxation: 2.3,
+      dampingCompression: 4.4,
+      maxSuspensionForce: 100000,
+      rollInfluence: 0.01,
+      axleLocal: new CANNON.Vec3(1, 0, 0),
+      chassisConnectionPointLocal: new CANNON.Vec3(1, 1, 0),
+      maxSuspensionTravel: 0.3,
+      customSlidingRotationalSpeed: -30,
+      useCustomSlidingRotationalSpeed: true
+    };
+
+    // Add 4 Wheels
+    options.chassisConnectionPointLocal.set(1, 0.2, 1.2);
+    vehicle.addWheel(options);
+
+    options.chassisConnectionPointLocal.set(-1, 0.2, 1.2);
+    vehicle.addWheel(options);
+
+    options.chassisConnectionPointLocal.set(1, 0.2, -1.2);
+    vehicle.addWheel(options);
+
+    options.chassisConnectionPointLocal.set(-1, 0.2, -1.2);
+    vehicle.addWheel(options);
+
+    vehicle.addToWorld(world);
+
+    // Wheel Visuals
+    const wheelMeshes = [];
+    const wheelGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.3, 20);
+    wheelGeo.rotateZ(Math.PI / 2);
+    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+
+    for (let i = 0; i < vehicle.wheelInfos.length; i++) {
+      const wheelMesh = new THREE.Mesh(wheelGeo, wheelMat);
+      wheelMesh.castShadow = true;
+      scene.add(wheelMesh);
+      wheelMeshes.push(wheelMesh);
+    }
+
+    // --- CONTROLS SYSTEM ---
+    const keys = { w: false, s: false, a: false, d: false };
+
+    window.addEventListener('keydown', (e) => {
+      const key = e.key.toLowerCase();
+      if (key === 'w' || e.key === 'ArrowUp') keys.w = true;
+      if (key === 's' || e.key === 'ArrowDown') keys.s = true;
+      if (key === 'a' || e.key === 'ArrowLeft') keys.a = true;
+      if (key === 'd' || e.key === 'ArrowRight') keys.d = true;
+      if (key === 'r') resetCar();
+    });
+
+    window.addEventListener('keyup', (e) => {
+      const key = e.key.toLowerCase();
+      if (key === 'w' || e.key === 'ArrowUp') keys.w = false;
+      if (key === 's' || e.key === 'ArrowDown') keys.s = false;
+      if (key === 'a' || e.key === 'ArrowLeft') keys.a = false;
+      if (key === 'd' || e.key === 'ArrowRight') keys.d = false;
+    });
+
+    function resetCar() {
+      carPhysicsBody.position.set(0, 2, 0);
+      carPhysicsBody.quaternion.set(0, 0, 0, 1);
+      carPhysicsBody.velocity.set(0, 0, 0);
+      carPhysicsBody.angularVelocity.set(0, 0, 0);
+    }
+
+    // --- GAME LOOP ---
+    const maxForce = 1500;
+    const maxSteerVal = 0.5;
+    const brakeForce = 45;
+    const speedElement = document.getElementById('speed');
+
+    function animate() {
+      requestAnimationFrame(animate);
+
+      // Physics step
+      world.step(1 / 60);
+
+      // Engine Force & Steering
+      const force = keys.w ? -maxForce : keys.s ? maxForce : 0;
+      const steer = keys.a ? maxSteerVal : keys.d ? -maxSteerVal : 0;
+
+      // Apply inputs to rear wheels
+      vehicle.applyEngineForce(force, 2);
+      vehicle.applyEngineForce(force, 3);
+
+      // Apply steering to front wheels
+      vehicle.setSteeringValue(steer, 0);
+      vehicle.setSteeringValue(steer, 1);
+
+      // Simple braking
+      if (!keys.w && !keys.s) {
+        vehicle.setBrake(brakeForce, 0);
+        vehicle.setBrake(brakeForce, 1);
+        vehicle.setBrake(brakeForce, 2);
+        vehicle.setBrake(brakeForce, 3);
+      } else {
+        vehicle.setBrake(0, 0);
+        vehicle.setBrake(0, 1);
+        vehicle.setBrake(0, 2);
+        vehicle.setBrake(0, 3);
+      }
+
+      // Update Mesh Positions from Physics Body
+      carBodyGroup.position.copy(carPhysicsBody.position);
+      carBodyGroup.quaternion.copy(carPhysicsBody.quaternion);
+
+      for (let i = 0; i < vehicle.wheelInfos.length; i++) {
+        vehicle.updateWheelTransform(i);
+        const t = vehicle.wheelInfos[i].worldTransform;
+        wheelMeshes[i].position.copy(t.position);
+        wheelMeshes[i].quaternion.copy(t.quaternion);
+      }
+
+      // Smooth Follow Camera
+      const cameraOffset = new THREE.Vector3(0, 5, 12);
+      cameraOffset.applyQuaternion(carBodyGroup.quaternion);
+      const targetCameraPosition = carBodyGroup.position.clone().add(cameraOffset);
+      
+      camera.position.lerp(targetCameraPosition, 0.1);
+      camera.lookAt(carBodyGroup.position.clone().add(new THREE.Vector3(0, 1, 0)));
+
+      // Update Speedometer UI
+      const speedKmH = Math.round(carPhysicsBody.velocity.length() * 3.6);
+      speedElement.innerText = speedKmH;
+
+      renderer.render(scene, camera);
+    }
+
+    // Handle Window Resizing
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Start Game Loop
+    animate();
+  </script>
+</body>
+</html>
